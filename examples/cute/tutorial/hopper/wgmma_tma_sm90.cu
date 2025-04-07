@@ -187,6 +187,14 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
   //   The MMA Descriptor generation is automatic via inspection and validation of the SMEM Layouts.
   //   Because the MMA reads directly from SMEM and the fragments are descriptors rather than registers,
   //     there is no need for copy(tCsA, tCrA) in the mainloop.
+
+  // SS mode (shared memory for A and B): need descriptors for A and B
+  // https://docs.nvidia.com/cuda/parallel-thread-execution/index.html#asynchronous-warpgroup-level-matrix-shared-memory-layout-matrix-descriptor
+  // Start address: starting base address of the operand in SMEM.
+  // LBO (leading dimension byte offset): the distance, in bytes, between two adjacent core matrices in the K dimension.
+  // SBO (stride dimension byte offset): the distance, in bytes, between two adjacent core matrices in the M or N dimension.
+  // Swizzling mode: none, 32, 64, or 128 bytes.
+  // Matrix base offset: This is used to resolve SMEM alignment problems in case SMEM addresses are not aligned to the byte boundary of the repeating pattern for the swizzle mode.
   //
 
   ThrMMA thr_mma = mma.get_thread_slice(threadIdx.x);
@@ -225,11 +233,24 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
 
     // MMAs to cover 1 K_TILE
+    // == wgmma.fence.sync.aligned;
+    // wgmma.fence: indicate that the register/shared-memory across the warpgroup have been written into
+    // (fence.proxy.async: make the generic proxy operations visible to the async proxy.)
+    // if operations performed in the generic proxy affect the SMEM read by wgmma.mma_async, we need to issue fence.proxy.async (copy A/B with ordinary ld.global/st.shared)
+    // we use tma.load here, so no need to issue fence.proxy.async
     warpgroup_arrive();
+    // contains inline PTX assembly
+    // The wgmma.mma_async operation is performed in the async proxy.
     gemm(mma, tCrA(_,_,_,read_pipe), tCrB(_,_,_,read_pipe), tCrC);     // (V,M) x (V,N) => (V,M,N)
+    // == wgmma.commit_group.sync.aligned;
+    // Create a wgmma-group and commit all the prior outstanding wgmma.mma_async operations into the group, by using wgmma.commit_group operation
+    // batches MMA_M*MMA_N*MMA_K many wgmma.mma_async instructions into one wgmma-group here
     warpgroup_commit_batch();
 
     // Wait for all MMAs in a K_TILE to complete
+    // == wgmma.wait_group.sync.aligned N;
+    // Wait for the completion of the required wgmma-group using wgmma.wait_group.
+    // N: make the executing thread wait until <=N most recent wgmma-groups are pending (all prior commited wgmma-groups are complete), 0 means wait for all
     warpgroup_wait<0>();
 
     // Notify that consumption is done
@@ -282,6 +303,7 @@ gemm_nt(int m, int n, int k,
   auto dC = make_stride(Int<1>{}, ldC);                      // (dM, dN)
 
   // Define CTA tile sizes (static)
+  // tiled over the shape (128, 64, 3) in column-major fashion
   auto bM = Int<128>{};
   auto bN = Int<128>{};
   auto bK = Int< 64>{};
@@ -289,10 +311,37 @@ gemm_nt(int m, int n, int k,
   auto bP = Int<  3>{};  // Pipeline
 
   // Define the smem layouts (static)
+  // MN: MN-major
+  // SW128: 128 byte swizzle mode
+  // recall:
+  // No swizzle: No swizzling. Implicit 16-byte boundary.
+  // 32-byte swizzle: Swizzling 2 consecutive 16-byte segments.
+  // 64-byte swizzle: Swizzling 4 consecutive 16-byte segments.
+  // 128-byte swizzle: Swizzling 8 consecutive 16-byte segments.
+  // all given layout atoms:
+  // GMMA::Layout_MN_INTER_Atom<T>
+  // GMMA::Layout_MN_SW32_Atom<T>
+  // GMMA::Layout_MN_SW64_Atom<T>
+  // GMMA::Layout_MN_SW128_Atom<T>
+  
+  // GMMA::Layout_K_INTER_Atom<T>
+  // GMMA::Layout_K_SW32_Atom<T>
+  // GMMA::Layout_K_SW64_Atom<T>
+  // GMMA::Layout_K_SW128_Atom<T>
   auto sA = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TA>{}, make_shape(bM,bK,bP));
   auto sB = tile_to_shape(GMMA::Layout_MN_SW128_Atom<TB>{}, make_shape(bN,bK,bP));
 
   // Define the MMA
+  // label: SM90_MxNxK_XYZ_SS or SM90_MxNxK_XYZ_RS
+  // X and Y are the datatypes of the operands.
+  // Z is the datatype of the accumulator.
+  // MxNxK are the tile sizes that the wgmma instruction computes with — the “wgmma atom”. 
+  // Not all values of MxNxK are possible: M is always 64, N is a multiple of 8 from 8 to 256, and for 16-bit operand datatype, K is 16 (more generally, K is fixed to be 32 bytes).
+  // The suffix RS or SS indicates whether operand A is sourced from registers (R) or shared memory (S). Operand B is always sourced from shared memory, hence the S.
+  // The two template parameters indicate whether operands A and B are memory-contiguous in the MN mode or K mode. 
+  // For example, in BLAS notations, the operands both being K-major would correspond to a TN gemm (cf. this table). 
+  // Note that for 16-bit operand datatypes, one has flexibility with the memory layouts being either MN-major or K-major. 
+  // However, for non 16-bit operand datatypes, the layout must always be K-major.
   TiledMMA tiled_mma = make_tiled_mma(SM90_64x64x16_F16F16F16_SS<GMMA::Major::MN,GMMA::Major::MN>{});
 
   // Define the TMAs
@@ -310,6 +359,7 @@ gemm_nt(int m, int n, int k,
 
   // Launch parameter setup
   int smem_size = int(sizeof(SharedStorage<TA, TB, decltype(sA), decltype(sB)>));
+  // each CTA launches with 1 warpgroup of 128 threads
   dim3 dimBlock(size(tiled_mma));
   dim3 dimCluster(2, 1, 1);
   dim3 dimGrid(round_up(size(ceil_div(m, bM)), dimCluster.x),
