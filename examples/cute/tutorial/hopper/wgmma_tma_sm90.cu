@@ -233,7 +233,8 @@ gemm_device(ProblemShape shape_MNK, CtaTiler cta_tiler,
     ProducerBarType::wait(&producer_mbar[read_pipe], read_state.phase());
 
     // MMAs to cover 1 K_TILE
-    // == wgmma.fence.sync.aligned;
+    // == wgmma.fence.sync.aligned; ensures that
+    // wgmma.mma_async only accesses certain RMEM addresses after all prior accesses to such addresses have finished
     // wgmma.fence: indicate that the register/shared-memory across the warpgroup have been written into
     // (fence.proxy.async: make the generic proxy operations visible to the async proxy.)
     // if operations performed in the generic proxy affect the SMEM read by wgmma.mma_async, we need to issue fence.proxy.async (copy A/B with ordinary ld.global/st.shared)
