@@ -28,20 +28,21 @@
  * OF THIS SOFTWARE, EVEN IF ADVISED OF THE POSSIBILITY OF SUCH DAMAGE.
  *
  **************************************************************************************************/
-#include <cstdlib>
-#include <cstdio>
 #include <cassert>
+#include <cstdio>
+#include <cstdlib>
+#include <vector>
 
-#include <thrust/host_vector.h>
 #include <thrust/device_vector.h>
+#include <thrust/host_vector.h>
 
 #include <cute/tensor.hpp>
 
 #include "cutlass/cluster_launch.hpp"
 
-#include "cutlass/util/print_error.hpp"
 #include "cutlass/util/GPU_Clock.hpp"
 #include "cutlass/util/helper_cuda.hpp"
+#include "cutlass/util/print_error.hpp"
 
 using namespace cute;
 
@@ -512,99 +513,103 @@ int main(int argc, char** argv)
     return 0;
   }
 
+  std::vector<int> m_list = {256, 512, 1024, 2048, 4096, 8192, 16384};
+  std::vector<int> n_list = {256, 512, 1024, 2048, 4096, 8192, 16384};
+  std::vector<int> k_list = {256, 512, 1024, 2048, 4096, 8192, 16384};
+
 #if defined(CUTLASS_ARCH_MMA_SM90A_SUPPORTED)
+  for (int m : m_list) {
+    for (int n : n_list) {
+      for (int k : k_list) {
+        if (argc >= 2)
+          sscanf(argv[1], "%d", &m);
 
-  int m = 5120;
-  if (argc >= 2)
-    sscanf(argv[1], "%d", &m);
+        if (argc >= 3)
+          sscanf(argv[2], "%d", &n);
 
-  int n = 5120;
-  if (argc >= 3)
-    sscanf(argv[2], "%d", &n);
+        if (argc >= 4)
+          sscanf(argv[3], "%d", &k);
 
-  int k = 4096;
-  if (argc >= 4)
-    sscanf(argv[3], "%d", &k);
+        char transA = 'N';
+        if (argc >= 5)
+          sscanf(argv[4], "%c", &transA);
 
-  char transA = 'N';
-  if (argc >= 5)
-    sscanf(argv[4], "%c", &transA);
+        char transB = 'T';
+        if (argc >= 6)
+          sscanf(argv[5], "%c", &transB);
 
-  char transB = 'T';
-  if (argc >= 6)
-    sscanf(argv[5], "%c", &transB);
+        using TA = cute::half_t;
+        using TB = cute::half_t;
+        using TC = cute::half_t;
+        using TI = cute::half_t;
 
-  using TA = cute::half_t;
-  using TB = cute::half_t;
-  using TC = cute::half_t;
-  using TI = cute::half_t;
+        TI alpha = TI(1.0f);
+        TI beta = TI(0.0f);
 
-  TI alpha = TI(1.0f);
-  TI beta  = TI(0.0f);
+        thrust::host_vector<TA> h_A(m * k);
+        thrust::host_vector<TB> h_B(n * k);
+        thrust::host_vector<TC> h_C(m * n);
 
-  thrust::host_vector<TA> h_A(m*k);
-  thrust::host_vector<TB> h_B(n*k);
-  thrust::host_vector<TC> h_C(m*n);
+        // Initialize the tensors
+        for (int j = 0; j < m * k; ++j)
+          h_A[j] = TA(int((rand() % 2) ? 1 : -1));
+        for (int j = 0; j < n * k; ++j)
+          h_B[j] = TB(int((rand() % 2) ? 1 : -1));
+        for (int j = 0; j < m * n; ++j)
+          h_C[j] = TC(0);
 
-  // Initialize the tensors
-  for (int j = 0; j < m*k; ++j) h_A[j] = TA(int((rand() % 2) ? 1 : -1));
-  for (int j = 0; j < n*k; ++j) h_B[j] = TB(int((rand() % 2) ? 1 : -1));
-  for (int j = 0; j < m*n; ++j) h_C[j] = TC(0);
+        thrust::device_vector<TA> d_A = h_A;
+        thrust::device_vector<TB> d_B = h_B;
+        thrust::device_vector<TC> d_C = h_C;
 
-  thrust::device_vector<TA> d_A = h_A;
-  thrust::device_vector<TB> d_B = h_B;
-  thrust::device_vector<TC> d_C = h_C;
+        double gflops = (2.0 * m * n * k) * 1e-9;
 
-  double gflops = (2.0*m*n*k) * 1e-9;
+        const int timing_iterations = 100;
+        GPU_Clock timer;
 
-  const int timing_iterations = 100;
-  GPU_Clock timer;
+        int ldA = 0, ldB = 0, ldC = m;
 
-  int ldA = 0, ldB = 0, ldC = m;
+        if (transA == 'N') {
+          ldA = m;
+        } else if (transA == 'T') {
+          ldA = k;
+        } else {
+          assert(false);
+        }
 
-  if (transA == 'N') {
-    ldA = m;
-  } else if (transA == 'T') {
-    ldA = k;
-  } else {
-    assert(false);
+        if (transB == 'N') {
+          ldB = k;
+        } else if (transB == 'T') {
+          ldB = n;
+        } else {
+          assert(false);
+        }
+
+        // Run once
+        d_C = h_C;
+        gemm(transA, transB, m, n, k, alpha, d_A.data().get(), ldA,
+             d_B.data().get(), ldB, beta, d_C.data().get(), ldC);
+        CUTE_CHECK_LAST();
+        thrust::host_vector<TC> cute_result = d_C;
+
+        // Timing iterations
+        timer.start();
+        for (int i = 0; i < timing_iterations; ++i) {
+          gemm(transA, transB, m, n, k, alpha, d_A.data().get(), ldA,
+               d_B.data().get(), ldB, beta, d_C.data().get(), ldC);
+        }
+        double cute_time = timer.seconds() / timing_iterations;
+        CUTE_CHECK_LAST();
+        printf("CUTE_GEMM %d %d %d %c %c:     [%6.1f]GFlop/s  (%6.4f)ms\n", m,
+               n, k, transA, transB, gflops / cute_time, cute_time * 1000);
+      }
+    }
   }
-
-  if (transB == 'N') {
-    ldB = k;
-  } else if (transB == 'T') {
-    ldB = n;
-  } else {
-    assert(false);
-  }
-
-  // Run once
-  d_C = h_C;
-  gemm(transA, transB, m, n, k,
-       alpha,
-       d_A.data().get(), ldA,
-       d_B.data().get(), ldB,
-       beta,
-       d_C.data().get(), ldC);
-  CUTE_CHECK_LAST();
-  thrust::host_vector<TC> cute_result = d_C;
-
-  // Timing iterations
-  timer.start();
-  for (int i = 0; i < timing_iterations; ++i) {
-    gemm(transA, transB, m, n, k,
-         alpha,
-         d_A.data().get(), ldA,
-         d_B.data().get(), ldB,
-         beta,
-         d_C.data().get(), ldC);
-  }
-  double cute_time = timer.seconds() / timing_iterations;
-  CUTE_CHECK_LAST();
-  printf("CUTE_GEMM:     [%6.1f]GFlop/s  (%6.4f)ms\n", gflops / cute_time, cute_time*1000);
 
 #else
-  std::cout << "CUTLASS_ARCH_MMA_SM90A_SUPPORTED must be enabled, but it is not. Test is waived \n" << std::endl;
+  std::cout << "CUTLASS_ARCH_MMA_SM90A_SUPPORTED must be enabled, but it is "
+               "not. Test is waived \n"
+            << std::endl;
 #endif
 
   return 0;

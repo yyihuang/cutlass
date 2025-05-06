@@ -1,0 +1,9 @@
+For quicker commands:
+
+mkdir -p build && cd build
+
+cmake .. 
+
+make cute_tutorial_wgmma_sm90 -j
+
+./examples/cute/tutorial/hopper/cute_tutorial_wgmma_sm90

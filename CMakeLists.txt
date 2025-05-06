@@ -565,6 +565,10 @@ if (MSVC)
   set(CMAKE_CUDA_FLAGS "${CMAKE_CUDA_FLAGS} -Xcompiler /bigobj")
 endif()
 
+# My SM90 MMA bench
+string(APPEND CMAKE_CXX_FLAGS " -DCUTLASS_ARCH_MMA_SM90A_SUPPORTED")
+string(APPEND CMAKE_CUDA_FLAGS " -DCUTLASS_ARCH_MMA_SM90A_SUPPORTED")
+
 function(cutlass_apply_cuda_gencode_flags TARGET)
   set(options)
   set(oneValueArgs)
