@@ -320,34 +320,41 @@ def bench_fmha(
 
 if __name__ == "__main__":
     # add benchmark cases here
-    benchmark_cases = [
-        # b, s, h, d, dtype, causal
-        (4, 1024, 8, 128, cutlass.Float16, False),
-        (4, 1024, 8, 128, cutlass.Float16, True),
-        (4, 4096, 8, 128, cutlass.Float16, False),
-        (4, 4096, 8, 128, cutlass.Float16, True),
-        (4, 1024, 8, 64, cutlass.Float16, False),
-        (4, 1024, 8, 64, cutlass.Float16, True),
+    benchmark_params = [
+        # b, s, h, d
+        # q_len in [512, 1024, 2048, 4096] with b=32
+        *[(32, s, 32, 128) for s in [512, 1024, 2048, 4096]],
+        # Other cases
+        (128, 512, 32, 128),
+        (64, 1024, 32, 128),
+        (32, 2048, 32, 128),
+        (16, 4096, 32, 128),
+        (8, 8192, 32, 128),
+        (4, 16384, 32, 128),
+        (2, 32768, 32, 128),
+        (1, 65536, 32, 128),
     ]
 
-    for b, s, h, d, dtype, causal in benchmark_cases:
-        q_shape = (b, s, h, d)
-        k_shape = (b, s, h, d)
+    for causal in [False, True]:
+        for b, s, h, d in benchmark_params:
+            q_shape = (b, s, h, d)
+            # In the user's example q_len == kv_len
+            k_shape = (b, s, h, d)
 
-        bench_fmha(
-            q_shape=q_shape,
-            k_shape=k_shape,
-            in_dtype=dtype,
-            out_dtype=dtype,
-            qk_acc_dtype=cutlass.Float32,
-            pv_acc_dtype=cutlass.Float32,
-            mma_tiler_mn=(128, 128),
-            is_persistent=True,
-            has_casual_mask=causal,
-            scale_q=1.0,
-            scale_k=1.0,
-            scale_v=1.0,
-            inv_scale_o=1.0,
-            scale_softmax=0.0,
-        )
+            bench_fmha(
+                q_shape=q_shape,
+                k_shape=k_shape,
+                in_dtype=cutlass.Float16, # Using Float16 instead of BFloat16
+                out_dtype=cutlass.Float16,
+                qk_acc_dtype=cutlass.Float32,
+                pv_acc_dtype=cutlass.Float32,
+                mma_tiler_mn=(128, 128),
+                is_persistent=True,
+                has_casual_mask=causal,
+                scale_q=1.0,
+                scale_k=1.0,
+                scale_v=1.0,
+                inv_scale_o=1.0,
+                scale_softmax=0.0,
+            )
     
